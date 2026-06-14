@@ -1,3 +1,5 @@
+# youtube_full_pipeline.py
+# Paste this file into the repo root (do NOT hardcode API keys).
 import os
 import datetime
 from pathlib import Path
@@ -7,8 +9,9 @@ from openai import OpenAI
 from PIL import Image, ImageDraw, ImageFont
 import subprocess
 import textwrap
+import re
 
-TOPIC = os.environ["TOPIC"]
+TOPIC = os.environ.get("TOPIC", "").strip()
 API_KEY = os.environ["OPENAI_API_KEY"]
 
 BASE = Path(".")
@@ -17,53 +20,84 @@ OUT.mkdir(exist_ok=True)
 
 client = OpenAI(api_key=API_KEY)
 
-print(f"[*] Topic: {TOPIC}")
+def call_openai(prompt, model="gpt-4o-mini", temp=0.7, max_tokens=2000):
+    resp = client.chat.completions.create(
+        model=model,
+        messages=[{"role":"user","content":prompt}],
+        temperature=temp,
+        max_tokens=max_tokens,
+    )
+    return resp.choices[0].message.content
 
+# If no topic provided, generate 3 high-demand topic ideas and pick the top one
+if not TOPIC:
+    print("[*] No topic provided. Generating high-demand topic ideas...")
+    topic_prompt = (
+        "You are an expert YouTube strategist. Propose 3 high-demand, high-virality video topics "
+        "for a faceless channel about general interest (money, psychology, life hacks, weird facts). "
+        "Return as numbered list with 1-line rationale each. Do not include anything else."
+    )
+    topics_text = call_openai(topic_prompt, temp=0.8, max_tokens=400)
+    print("[*] Topic ideas:\n", topics_text)
+    # pick the first non-empty line as TOPIC fallback
+    m = re.search(r"1\.\s*(.+)", topics_text)
+    if m:
+        TOPIC = m.group(1).strip()
+    else:
+        TOPIC = "Weird facts that blow your mind"
+
+print(f"[*] Using topic: {TOPIC}")
+
+# Viral-optimized prompt: hook, retention, structure, thumbnail text, SEO
 prompt = f"""
-You are a YouTube content creator.
-
-Generate:
-1. A strong YouTube title (max 70 characters)
-2. A compelling description (2–3 paragraphs + bullet points)
-3. A full video script (around 1200–1500 words) broken into short paragraphs.
-
-Topic: "{TOPIC}"
-
-Return in this exact format:
+You are a top YouTube writer and growth strategist. For the topic: "{TOPIC}" produce the following sections
+in this exact labeled format. Be concise, punchy, and optimized for retention and clicks.
 
 TITLE:
-<one line>
+A clickable SEO title (<=70 chars) that includes a strong hook word.
 
 DESCRIPTION:
-<multi-line>
+2 short paragraphs (3-4 sentences each) + 3 bullet points with timestamps or highlights.
+
+THUMBNAIL_TEXT:
+Two short lines of bold thumbnail text (max 6 words per line). Keep it urgent/curiosity-driven.
 
 SCRIPT:
-<multi-line>
+A full spoken script ~900-1400 words, broken into short paragraphs. Requirements:
+- Start with a 3-second hook line (very short, high curiosity).
+- Use curiosity loops every 20-40 seconds (tease, then promise payoff).
+- Keep sentences short; paragraphs 1-3 lines max.
+- Include 3 explicit "retention prompts" (phrases that encourage watching to the end).
+- End with a clear payoff and a call-to-action (subscribe/watch next).
+
+Also return a short "CHAPTERS" section: 5 timestamps with short labels that map to script structure.
+Return nothing else.
 """
 
-resp = client.chat.completions.create(
-    model="gpt-4o-mini",
-    messages=[{"role": "user", "content": prompt}],
-    temperature=0.8,
-)
+print("[*] Requesting viral-optimized content from OpenAI...")
+full_text = call_openai(prompt, temp=0.8, max_tokens=2500)
 
-text = resp.choices[0].message.content
-
-def extract(label, txt):
+# Helper to extract labeled sections
+def extract_section(label, text):
     marker = f"{label}:\n"
-    start = txt.index(marker) + len(marker)
-    end = len(txt)
-    for other in ["TITLE:\n", "DESCRIPTION:\n", "SCRIPT:\n"]:
-        if other == marker:
-            continue
-        idx = txt.find(other, start)
+    if marker not in text:
+        return ""
+    start = text.index(marker) + len(marker)
+    # find next label or end
+    next_labels = ["TITLE:\n","DESCRIPTION:\n","THUMBNAIL_TEXT:\n","SCRIPT:\n","CHAPTERS:\n"]
+    end = len(text)
+    for nl in next_labels:
+        if nl == marker: continue
+        idx = text.find(nl, start)
         if idx != -1:
             end = min(end, idx)
-    return txt[start:end].strip()
+    return text[start:end].strip()
 
-title = extract("TITLE", text)
-description = extract("DESCRIPTION", text)
-script = extract("SCRIPT", text)
+title = extract_section("TITLE", full_text)
+description = extract_section("DESCRIPTION", full_text)
+thumbnail_text = extract_section("THUMBNAIL_TEXT", full_text)
+script = extract_section("SCRIPT", full_text)
+chapters = extract_section("CHAPTERS", full_text)
 
 now = datetime.datetime.utcnow().strftime("%Y-%m-%d_%H-%M-%S")
 slug = slugify(TOPIC)[:60]
@@ -71,47 +105,64 @@ folder = OUT / f"{now}_{slug}"
 folder.mkdir(exist_ok=True)
 
 # Save text files
-(script_path := folder / "script.md").write_text(
-    f"# {title}\n\n## Description\n{description}\n\n## Script\n\n{script}",
-    encoding="utf-8",
-)
 (folder / "title.txt").write_text(title, encoding="utf-8")
 (folder / "description.txt").write_text(description, encoding="utf-8")
+(script_path := folder / "script.md").write_text(f"# {title}\n\n## Description\n{description}\n\n## Script\n\n{script}\n\n## Chapters\n{chapters}", encoding="utf-8")
 
 print(f"[*] Saved script to {script_path}")
 
 # Voiceover
-print("[*] Generating voiceover...")
+print("[*] Generating voiceover with gTTS...")
 tts = gTTS(script, lang="en")
 audio_path = folder / "voiceover.mp3"
 tts.save(str(audio_path))
 print(f"[*] Saved audio to {audio_path}")
 
-# Thumbnail (simple text on background)
+# Thumbnail generation: two-line bold text on high-contrast background
 print("[*] Generating thumbnail...")
 thumb_path = folder / "thumbnail.png"
-img = Image.new("RGB", (1280, 720), color=(20, 20, 20))
+img = Image.new("RGB", (1280, 720), color=(18,18,18))
 draw = ImageDraw.Draw(img)
 
-try:
-    font = ImageFont.truetype("DejaVuSans-Bold.ttf", 64)
-except:
-    font = ImageFont.load_default()
+# Prepare thumbnail text lines
+lines = [l.strip() for l in thumbnail_text.splitlines() if l.strip()]
+if not lines:
+    # fallback: use title split
+    lines = textwrap.wrap(title, width=18)[:2]
 
-wrapped = textwrap.fill(title, width=20)
-w, h = draw.multiline_textsize(wrapped, font=font)
-x = (1280 - w) // 2
-y = (720 - h) // 2
-draw.multiline_text((x, y), wrapped, font=font, fill=(255, 255, 255))
+try:
+    font_large = ImageFont.truetype("DejaVuSans-Bold.ttf", 88)
+    font_small = ImageFont.truetype("DejaVuSans-Bold.ttf", 56)
+except:
+    font_large = ImageFont.load_default()
+    font_small = ImageFont.load_default()
+
+# draw a subtle rectangle for contrast
+draw.rectangle([(40, 40), (1240, 680)], fill=(28,28,28))
+y = 120
+for i, line in enumerate(lines[:2]):
+    f = font_large if i == 0 else font_small
+    w, h = draw.textsize(line, font=f)
+    x = (1280 - w) // 2
+    draw.text((x, y), line, font=f, fill=(255, 230, 0))
+    y += h + 10
+
+# small channel tag
+tag = "silver-broccoli"
+tw, th = draw.textsize(tag, font=font_small)
+draw.rectangle([(40, 680-th-20), (40+tw+20, 680)], fill=(255,255,255))
+draw.text((50, 680-th-10), tag, font=font_small, fill=(0,0,0))
+
 img.save(thumb_path)
 print(f"[*] Saved thumbnail to {thumb_path}")
 
 # Video: static thumbnail + audio
-print("[*] Generating video...")
+print("[*] Generating video (ffmpeg)...")
 video_path = folder / "final_video.mp4"
 
 subprocess.run([
     "ffmpeg",
+    "-y",
     "-loop", "1",
     "-i", str(thumb_path),
     "-i", str(audio_path),
@@ -122,7 +173,6 @@ subprocess.run([
     "-pix_fmt", "yuv420p",
     "-shortest",
     str(video_path),
-    "-y",
 ], check=True)
 
 print(f"[*] Final video: {video_path}")
