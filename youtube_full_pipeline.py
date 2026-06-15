@@ -48,10 +48,10 @@ def scrape_google_trends():
 def scrape_youtube_trending():
     url = "https://www.youtube.com/feed/trending"
     r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"})
-    titles = re.findall(r'"title":{"runs":
-
-\[{"text":"(.*?)"}', r.text)
-    return titles[:10]
+    # More stable pattern: match ANY "text":"..."
+    titles = re.findall(r'"text":"(.*?)"', r.text)
+    clean = [t for t in titles if 5 < len(t) < 120]
+    return clean[:10]
 
 def scrape_reddit_hot():
     url = "https://www.reddit.com/r/all/hot.json?limit=10"
@@ -251,3 +251,4 @@ subprocess.run([
 
 print(f"[*] Final video: {video_path}")
 print("[*] DONE — Full automation complete.")
+
