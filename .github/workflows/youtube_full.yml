@@ -10,6 +10,7 @@ permissions:
 jobs:
   build-video:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
 
     steps:
       - name: Checkout repo
@@ -33,8 +34,9 @@ jobs:
       - name: Generate script, audio, thumbnail, and video
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NUM_VIDEOS: 1
         run: |
-          python youtube_full_pipeline.py
+          python -u youtube_full_pipeline.py
 
       - name: Upload output as artifact
         uses: actions/upload-artifact@v4
