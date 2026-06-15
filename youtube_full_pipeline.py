@@ -1,6 +1,6 @@
 # youtube_full_pipeline.py
 # FULL AUTOMATION — Trend Scraper + Viral Script + Audio + Thumbnail + Video (Batch Mode)
-# Uses GitHub Models (FREE)
+# GitHub Actions friendly + hardened pipeline
 
 import os
 import sys
@@ -18,6 +18,9 @@ import textwrap
 import re
 from requests.exceptions import RequestException
 
+# -------------------------------
+# CONFIG
+# -------------------------------
 BASE = Path(".")
 OUT = BASE / "output"
 OUT.mkdir(exist_ok=True)
@@ -26,11 +29,11 @@ NUM_VIDEOS = int(os.environ.get("NUM_VIDEOS", "3"))
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
 
 if not GITHUB_TOKEN:
-    print("[!] Missing GITHUB_TOKEN environment variable. Exiting.")
+    print("[FATAL] Missing GITHUB_TOKEN")
     sys.exit(1)
 
 # -------------------------------
-# FREE GITHUB MODELS CLIENT
+# GitHub Models Client
 # -------------------------------
 client = OpenAI(
     base_url="https://models.github.ai/inference",
@@ -45,104 +48,100 @@ def call_llm(prompt, model="openai/gpt-4o-mini", temp=0.7, max_tokens=2000):
             temperature=temp,
             max_tokens=max_tokens,
         )
-        if not getattr(resp, "choices", None):
-            return ""
-        return resp.choices[0].message.content or ""
-    except Exception:
+        return resp.choices[0].message.content.strip()
+    except Exception as e:
+        print(f"[LLM ERROR] {e}")
         return ""
 
 # -------------------------------
-# HTTP helper with retries
+# HTTP helper
 # -------------------------------
-def http_get_with_retries(url, headers=None, timeout=10, retries=3, backoff=1.5):
-    headers = headers or {"User-Agent": "Mozilla/5.0 (compatible; silver-broccoli/1.0)"}
-    for attempt in range(1, retries + 1):
+def http_get(url, timeout=10, retries=3):
+    headers = {"User-Agent": "Mozilla/5.0 (GitHub Actions Bot)"}
+    for i in range(retries):
         try:
-            return requests.get(url, headers=headers, timeout=timeout)
+            r = requests.get(url, headers=headers, timeout=timeout)
+            if r.status_code == 200:
+                return r
         except RequestException:
-            if attempt < retries:
-                time.sleep(backoff ** attempt)
+            time.sleep(2 ** i)
     return None
 
 # -------------------------------
-# TREND SCRAPERS
+# TREND SOURCES
 # -------------------------------
 def scrape_google_trends():
     try:
-        feed = feedparser.parse("https://trends.google.com/trends/trendingsearches/daily/rss?geo=US")
+        feed = feedparser.parse(
+            "https://trends.google.com/trends/trendingsearches/daily/rss?geo=US"
+        )
         return [e.title for e in feed.entries[:10]]
-    except Exception:
+    except:
         return []
 
 def scrape_youtube_trending():
     try:
-        r = http_get_with_retries("https://www.youtube.com/feed/trending")
-        if not r or r.status_code != 200:
+        r = http_get("https://www.youtube.com/feed/trending")
+        if not r:
             return []
         titles = re.findall(r'"text":"(.*?)"', r.text)
-        return [t for t in titles if 5 < len(t) < 120][:20]
-    except Exception:
+        return titles[:20]
+    except:
         return []
 
 def scrape_reddit_hot():
     try:
-        r = http_get_with_retries("https://old.reddit.com/r/all/hot.json?limit=20")
-        if not r or r.status_code != 200:
+        r = http_get("https://www.reddit.com/r/all/hot.json?limit=20")
+        if not r:
             return []
         data = r.json()
-        posts = data.get("data", {}).get("children", [])
-        out = []
-        for p in posts:
-            t = p.get("data", {}).get("title", "")
-            if 5 < len(t) < 200:
-                out.append(t)
-        return out[:20]
-    except Exception:
+        return [
+            p["data"]["title"]
+            for p in data.get("data", {}).get("children", [])
+            if "title" in p.get("data", {})
+        ]
+    except:
         return []
 
 # -------------------------------
-# VIRAL TOPIC SELECTION
+# TOPIC SELECTION
 # -------------------------------
 def pick_best_topic():
-    print("[*] Scraping trending topics...")
+    print("[*] Collecting trends...")
 
-    google = scrape_google_trends()
-    youtube = scrape_youtube_trending()
-    reddit = scrape_reddit_hot()
+    topics = (
+        scrape_google_trends()
+        + scrape_youtube_trending()
+        + scrape_reddit_hot()
+    )
 
-    combined = google + youtube + reddit
-    combined = [c.strip() for c in combined if c and len(c.strip()) > 5]
+    topics = [t.strip() for t in topics if t and len(t.strip()) > 5]
 
-    banned = {
-        "Try searching to get started",
-        "Trending", "Shorts", "Home", "Explore",
-        "Subscriptions", "Library", "History",
-        "Sign in", "Music", "Gaming", "News"
+    blacklist = {
+        "Trending", "Shorts", "Explore", "Subscriptions",
+        "Library", "History", "Sign in"
     }
-    combined = [c for c in combined if c not in banned]
 
-    if not combined:
-        print("[!] No valid trending topics found. Using fallback.")
-        return "Mind-blowing psychology facts"
+    topics = list(dict.fromkeys([t for t in topics if t not in blacklist]))
 
-    combined = list(dict.fromkeys(combined))
+    if not topics:
+        print("[WARN] No trends found, using fallback")
+        return "Mind blowing psychology facts"
 
-    scoring_prompt = f"""
-Score each topic 1–10 for viral potential on a faceless YouTube channel.
+    prompt = f"""
+Rate each topic 1-10 for viral YouTube potential.
 
-Return ONLY:
+Return format:
 score | topic
 
 Topics:
-{chr(10).join(combined)}
+{chr(10).join(topics)}
 """
 
-    scored = call_llm(scoring_prompt, temp=0.4, max_tokens=800)
-    if not scored:
-        return combined[0]
+    scored = call_llm(prompt, temp=0.4, max_tokens=800)
 
     best_score = -1
-    best_topic = combined[0]
+    best_topic = topics[0]
 
     for line in scored.splitlines():
         m = re.match(r"(\d+)\s*\|\s*(.+)", line)
@@ -153,17 +152,26 @@ Topics:
                 best_score = score
                 best_topic = topic
 
-    print(f"[*] Selected viral topic: {best_topic}")
+    print(f"[OK] Selected topic: {best_topic}")
     return best_topic
 
 # -------------------------------
-# PIPELINE FOR ONE TOPIC
+# PIPELINE
 # -------------------------------
-def run_pipeline_for_topic(TOPIC):
-    print(f"[*] Starting pipeline for topic: {TOPIC}")
+def parse_section(text, label):
+    pattern = rf"{label}:\s*(.*?)(?=\n[A-Z]+:|$)"
+    match = re.search(pattern, text, re.S)
+    return match.group(1).strip() if match else ""
+
+def run_pipeline(topic):
+    print(f"\n[*] Running pipeline: {topic}")
 
     prompt = f"""
-You are a top YouTube writer. For the topic "{TOPIC}", produce:
+You are a viral YouTube script generator.
+
+Topic: {topic}
+
+Return EXACT format:
 
 TITLE:
 DESCRIPTION:
@@ -172,115 +180,101 @@ SCRIPT:
 CHAPTERS:
 """
 
-    full_text = call_llm(prompt, temp=0.8, max_tokens=2500)
-    if not full_text:
+    result = call_llm(prompt, temp=0.8, max_tokens=2500)
+    if not result:
         return False
 
-    def extract(label):
-        marker = f"{label}:\n"
-        if marker not in full_text:
-            return ""
-        start = full_text.index(marker) + len(marker)
-        next_labels = ["TITLE:\n","DESCRIPTION:\n","THUMBNAIL_TEXT:\n","SCRIPT:\n","CHAPTERS:\n"]
-        end = len(full_text)
-        for nl in next_labels:
-            if nl == marker: continue
-            idx = full_text.find(nl, start)
-            if idx != -1:
-                end = min(end, idx)
-        return full_text[start:end].strip()
-
-    title = extract("TITLE") or TOPIC
-    description = extract("DESCRIPTION")
-    thumbnail_text = extract("THUMBNAIL_TEXT")
-    script = extract("SCRIPT")
-    chapters = extract("CHAPTERS")
+    title = parse_section(result, "TITLE") or topic
+    description = parse_section(result, "DESCRIPTION")
+    thumb = parse_section(result, "THUMBNAIL_TEXT")
+    script = parse_section(result, "SCRIPT")
+    chapters = parse_section(result, "CHAPTERS")
 
     if not script:
+        print("[WARN] No script generated")
         return False
 
-    now = datetime.datetime.utcnow().strftime("%Y-%m-%d_%H-%M-%S")
-    slug = slugify(TOPIC)[:60]
-    folder = OUT / f"{now}_{slug}"
-    folder.mkdir(exist_ok=True)
+    stamp = datetime.datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    folder = OUT / f"{stamp}_{slugify(topic)[:60]}"
+    folder.mkdir(parents=True, exist_ok=True)
 
-    (folder / "title.txt").write_text(title)
-    (folder / "description.txt").write_text(description)
-    (folder / "script.md").write_text(
-        f"# {title}\n\n## Description\n{description}\n\n## Script\n\n{script}\n\n## Chapters\n{chapters}"
-    )
+    (folder / "title.txt").write_text(title, encoding="utf-8")
+    (folder / "description.txt").write_text(description, encoding="utf-8")
+    (folder / "script.txt").write_text(script, encoding="utf-8")
 
-    # Voiceover
+    # ---------------- AUDIO ----------------
     try:
-        tts = gTTS(script, lang="en")
-        audio_path = folder / "voiceover.mp3"
-        tts.save(str(audio_path))
-    except Exception:
+        audio_file = folder / "voiceover.mp3"
+        gTTS(script[:4500], lang="en").save(str(audio_file))
+    except Exception as e:
+        print(f"[TTS ERROR] {e}")
         return False
 
-    # Thumbnail
+    # ---------------- THUMBNAIL ----------------
     try:
-        thumb_path = folder / "thumbnail.png"
-        img = Image.new("RGB", (1280, 720), color=(18,18,18))
+        img = Image.new("RGB", (1280, 720), (20, 20, 20))
         draw = ImageDraw.Draw(img)
 
-        lines = [l.strip() for l in thumbnail_text.splitlines() if l.strip()] or textwrap.wrap(title, 18)[:2]
+        text_lines = thumb.split("\n") if thumb else [title]
 
         try:
-            font_large = ImageFont.truetype("DejaVuSans-Bold.ttf", 88)
-            font_small = ImageFont.truetype("DejaVuSans-Bold.ttf", 56)
+            font1 = ImageFont.truetype("DejaVuSans-Bold.ttf", 80)
+            font2 = ImageFont.truetype("DejaVuSans-Bold.ttf", 50)
         except:
-            font_large = ImageFont.load_default()
-            font_small = ImageFont.load_default()
+            font1 = ImageFont.load_default()
+            font2 = ImageFont.load_default()
 
-        draw.rectangle([(40, 40), (1240, 680)], fill=(28,28,28))
-        y = 120
-        for i, line in enumerate(lines[:2]):
-            f = font_large if i == 0 else font_small
-            w, h = draw.textsize(line, font=f)
+        y = 180
+        for i, line in enumerate(text_lines[:2]):
+            font = font1 if i == 0 else font2
+            w = draw.textlength(line, font=font)
             x = (1280 - w) // 2
-            draw.text((x, y), line, font=f, fill=(255, 230, 0))
-            y += h + 10
+            draw.text((x, y), line, fill=(255, 220, 0), font=font)
+            y += 120
 
+        thumb_path = folder / "thumbnail.png"
         img.save(thumb_path)
-    except Exception:
+    except Exception as e:
+        print(f"[THUMB ERROR] {e}")
         return False
 
-    # Video
+    # ---------------- VIDEO ----------------
     try:
-        video_path = folder / "final_video.mp4"
+        video_path = folder / "final.mp4"
         subprocess.run([
             "ffmpeg", "-y",
             "-loop", "1",
             "-i", str(thumb_path),
-            "-i", str(audio_path),
+            "-i", str(folder / "voiceover.mp3"),
             "-c:v", "libx264",
             "-tune", "stillimage",
             "-c:a", "aac",
             "-b:a", "192k",
             "-pix_fmt", "yuv420p",
             "-shortest",
-            str(video_path),
+            str(video_path)
         ], check=True)
-    except Exception:
+    except Exception as e:
+        print(f"[FFMPEG ERROR] {e}")
         return False
 
+    print(f"[DONE] {topic}")
     return True
 
 # -------------------------------
 # MAIN
 # -------------------------------
 def main():
-    topics = []
-    for _ in range(NUM_VIDEOS):
-        topics.append(pick_best_topic())
+    print("=== PIPELINE START ===")
 
-    successes = 0
+    topics = [pick_best_topic() for _ in range(NUM_VIDEOS)]
+
+    success = 0
     for t in topics:
-        if run_pipeline_for_topic(t):
-            successes += 1
+        if run_pipeline(t):
+            success += 1
 
-    print(f"[*] Completed. Successes: {successes}/{len(topics)}")
+    print(f"\n=== COMPLETE: {success}/{len(topics)} videos ===")
     return 0
 
 if __name__ == "__main__":
