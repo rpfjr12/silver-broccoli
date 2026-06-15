@@ -1,6 +1,7 @@
 # youtube_full_pipeline.py
-# FULL AUTOMATION — Trend Scraper + Viral Script + Audio + Thumbnail + Video (Batch Mode)
-# GitHub Actions friendly + hardened pipeline
+# FULL AUTOMATION — High-Retention YouTube Video Generator (Batch Mode)
+# Trend Scraper + Viral Script + Audio + Thumbnail + Video
+# GitHub Actions friendly
 
 import os
 import sys
@@ -40,7 +41,7 @@ client = OpenAI(
     api_key=GITHUB_TOKEN,
 )
 
-def call_llm(prompt, model="openai/gpt-4o-mini", temp=0.7, max_tokens=2000):
+def call_llm(prompt, model="openai/gpt-4o-mini", temp=0.75, max_tokens=2200):
     try:
         resp = client.chat.completions.create(
             model=model,
@@ -48,7 +49,7 @@ def call_llm(prompt, model="openai/gpt-4o-mini", temp=0.7, max_tokens=2000):
             temperature=temp,
             max_tokens=max_tokens,
         )
-        return resp.choices[0].message.content.strip()
+        return (resp.choices[0].message.content or "").strip()
     except Exception as e:
         print(f"[LLM ERROR] {e}")
         return ""
@@ -85,13 +86,13 @@ def scrape_youtube_trending():
         if not r:
             return []
         titles = re.findall(r'"text":"(.*?)"', r.text)
-        return titles[:20]
+        return [t for t in titles if 5 < len(t) < 120][:30]
     except:
         return []
 
 def scrape_reddit_hot():
     try:
-        r = http_get("https://www.reddit.com/r/all/hot.json?limit=20")
+        r = http_get("https://www.reddit.com/r/all/hot.json?limit=25")
         if not r:
             return []
         data = r.json()
@@ -119,26 +120,35 @@ def pick_best_topic():
 
     blacklist = {
         "Trending", "Shorts", "Explore", "Subscriptions",
-        "Library", "History", "Sign in"
+        "Library", "History", "Sign in",
+        "Home", "Music", "Gaming", "News",
+        "Start watching videos to help us build a feed of videos you'll love.",
+        "Try searching to get started",
     }
 
-    topics = list(dict.fromkeys([t for t in topics if t not in blacklist]))
+    topics = [t for t in topics if t not in blacklist]
+    topics = list(dict.fromkeys(topics))
 
     if not topics:
         print("[WARN] No trends found, using fallback")
-        return "Mind blowing psychology facts"
+        return "Mind blowing psychology facts that will change how you see people"
 
     prompt = f"""
-Rate each topic 1-10 for viral YouTube potential.
+You are a YouTube virality and retention expert.
 
-Return format:
+Rate each topic 1-10 for viral potential on a faceless channel.
+Prefer:
+- Emotion, conflict, secrets, psychology, money, status, relationships, tech, or shocking facts.
+- Topics that can sustain 10+ minutes of storytelling and examples.
+
+Return format ONLY:
 score | topic
 
 Topics:
 {chr(10).join(topics)}
 """
 
-    scored = call_llm(prompt, temp=0.4, max_tokens=800)
+    scored = call_llm(prompt, temp=0.4, max_tokens=900)
 
     best_score = -1
     best_topic = topics[0]
@@ -146,42 +156,81 @@ Topics:
     for line in scored.splitlines():
         m = re.match(r"(\d+)\s*\|\s*(.+)", line)
         if m:
-            score = int(m.group(1))
+            try:
+                score = int(m.group(1))
+            except:
+                continue
             topic = m.group(2).strip()
             if score > best_score:
                 best_score = score
                 best_topic = topic
 
-    print(f"[OK] Selected topic: {best_topic}")
+    print(f"[OK] Selected topic: {best_topic} (score {best_score})")
     return best_topic
 
 # -------------------------------
-# PIPELINE
+# PARSING HELPERS
 # -------------------------------
 def parse_section(text, label):
-    pattern = rf"{label}:\s*(.*?)(?=\n[A-Z]+:|$)"
+    pattern = rf"{label}:\s*(.*?)(?=\n[A-Z_]+:|$)"
     match = re.search(pattern, text, re.S)
     return match.group(1).strip() if match else ""
 
+# -------------------------------
+# PIPELINE FOR ONE VIDEO
+# -------------------------------
 def run_pipeline(topic):
     print(f"\n[*] Running pipeline: {topic}")
 
     prompt = f"""
-You are a viral YouTube script generator.
+You are a world-class YouTube scriptwriter and growth strategist.
 
-Topic: {topic}
+Write for a faceless channel with AI voiceover and simple visuals.
 
-Return EXACT format:
+Topic: "{topic}"
+
+Return EXACTLY these sections and labels:
 
 TITLE:
+- 1 clickable title (max 70 chars)
+- Use a strong hook word (shocking, secret, hidden, insane, etc.)
+- Make it specific, not generic clickbait.
+
 DESCRIPTION:
+- 2 short paragraphs (3-4 sentences each).
+- First paragraph: hook + what they'll learn.
+- Second paragraph: social proof + subtle CTA to subscribe.
+- Then 3 bullet points with timestamps or key hooks.
+
 THUMBNAIL_TEXT:
+- 2 lines, max 4 words per line.
+- All caps, ultra bold, curiosity-driven.
+- No hashtags, no emojis.
+
 SCRIPT:
+- 900–1400 words.
+- First 5 seconds: punchy hook that creates an open loop.
+- Then a fast promise of value.
+- Use simple language, short sentences, and 1–3 line paragraphs.
+- Use pattern interrupts every 20–40 seconds (questions, surprising facts, "most people don't know this", etc.).
+- Include at least 3 explicit retention prompts like:
+  - "Stick with me for a second..."
+  - "Don't click away yet..."
+  - "And in a moment, I'll show you..."
+- Use concrete examples, mini-stories, and vivid imagery.
+- End with a satisfying payoff that closes the main loop, then a clear CTA to like + subscribe.
+
 CHAPTERS:
+- 5–7 chapters.
+- Format: 00:00 - Hook / Big Promise
+- Make chapter titles curiosity-driven, not boring.
+
+Return ONLY those labeled sections in that order.
 """
 
-    result = call_llm(prompt, temp=0.8, max_tokens=2500)
+    result = call_llm(prompt, temp=0.85, max_tokens=2600)
     if not result:
+        print("[WARN] Empty LLM result")
         return False
 
     title = parse_section(result, "TITLE") or topic
@@ -190,8 +239,8 @@ CHAPTERS:
     script = parse_section(result, "SCRIPT")
     chapters = parse_section(result, "CHAPTERS")
 
-    if not script:
-        print("[WARN] No script generated")
+    if not script or len(script.split()) < 400:
+        print("[WARN] Script too short or missing")
         return False
 
     stamp = datetime.datetime.utcnow().strftime("%Y%m%d_%H%M%S")
@@ -201,36 +250,57 @@ CHAPTERS:
     (folder / "title.txt").write_text(title, encoding="utf-8")
     (folder / "description.txt").write_text(description, encoding="utf-8")
     (folder / "script.txt").write_text(script, encoding="utf-8")
+    (folder / "chapters.txt").write_text(chapters, encoding="utf-8")
 
     # ---------------- AUDIO ----------------
     try:
         audio_file = folder / "voiceover.mp3"
-        gTTS(script[:4500], lang="en").save(str(audio_file))
+        # gTTS has length limits; trim if insane
+        tts_text = script[:8000]
+        gTTS(tts_text, lang="en").save(str(audio_file))
     except Exception as e:
         print(f"[TTS ERROR] {e}")
         return False
 
     # ---------------- THUMBNAIL ----------------
     try:
-        img = Image.new("RGB", (1280, 720), (20, 20, 20))
+        img = Image.new("RGB", (1280, 720), (15, 15, 15))
         draw = ImageDraw.Draw(img)
 
-        text_lines = thumb.split("\n") if thumb else [title]
+        if thumb:
+            raw_lines = [l.strip() for l in thumb.splitlines() if l.strip()]
+        else:
+            raw_lines = textwrap.wrap(title.upper(), width=10)[:2]
+
+        lines = raw_lines[:2]
 
         try:
-            font1 = ImageFont.truetype("DejaVuSans-Bold.ttf", 80)
-            font2 = ImageFont.truetype("DejaVuSans-Bold.ttf", 50)
+            font1 = ImageFont.truetype("DejaVuSans-Bold.ttf", 110)
+            font2 = ImageFont.truetype("DejaVuSans-Bold.ttf", 80)
         except:
             font1 = ImageFont.load_default()
             font2 = ImageFont.load_default()
 
-        y = 180
-        for i, line in enumerate(text_lines[:2]):
+        # Background block
+        draw.rectangle([(80, 120), (1200, 600)], fill=(25, 25, 25))
+
+        y = 200
+        for i, line in enumerate(lines):
             font = font1 if i == 0 else font2
             w = draw.textlength(line, font=font)
             x = (1280 - w) // 2
-            draw.text((x, y), line, fill=(255, 220, 0), font=font)
-            y += 120
+            draw.text((x, y), line, fill=(255, 230, 0), font=font)
+            y += 150
+
+        # Small brand tag
+        tag = "SILVER BROCCOLI"
+        try:
+            tag_font = ImageFont.truetype("DejaVuSans-Bold.ttf", 36)
+        except:
+            tag_font = ImageFont.load_default()
+        tw = draw.textlength(tag, font=tag_font)
+        draw.rectangle([(80, 640 - 60), (80 + tw + 40, 640)], fill=(255, 255, 255))
+        draw.text((100, 640 - 50), tag, fill=(0, 0, 0), font=tag_font)
 
         thumb_path = folder / "thumbnail.png"
         img.save(thumb_path)
