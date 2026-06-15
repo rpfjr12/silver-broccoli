@@ -1,8 +1,11 @@
 # youtube_full_pipeline.py
-# FREE VERSION — uses GitHub Models instead of OpenAI
+# FULL AUTOMATION — Trend Scraper + Viral Script + Audio + Thumbnail + Video
+# Uses GitHub Models (FREE)
 
 import os
 import datetime
+import feedparser
+import requests
 from pathlib import Path
 from slugify import slugify
 from gtts import gTTS
@@ -11,8 +14,6 @@ from PIL import Image, ImageDraw, ImageFont
 import subprocess
 import textwrap
 import re
-
-TOPIC = os.environ.get("TOPIC", "").strip()
 
 BASE = Path(".")
 OUT = BASE / "output"
@@ -23,10 +24,10 @@ OUT.mkdir(exist_ok=True)
 # -------------------------------
 client = OpenAI(
     base_url="https://models.github.ai/inference",
-    api_key=os.environ["GITHUB_TOKEN"],   # GitHub Actions provides this automatically
+    api_key=os.environ["GITHUB_TOKEN"],
 )
 
-def call_openai(prompt, model="openai/gpt-4o-mini", temp=0.7, max_tokens=2000):
+def call_llm(prompt, model="openai/gpt-4o-mini", temp=0.7, max_tokens=2000):
     resp = client.chat.completions.create(
         model=model,
         messages=[{"role": "user", "content": prompt}],
@@ -35,25 +36,91 @@ def call_openai(prompt, model="openai/gpt-4o-mini", temp=0.7, max_tokens=2000):
     )
     return resp.choices[0].message.content
 
-# If no topic provided, generate 3 high-demand topic ideas and pick the top one
+# -------------------------------
+# TREND SCRAPERS
+# -------------------------------
+
+def scrape_google_trends():
+    url = "https://trends.google.com/trends/trendingsearches/daily/rss?geo=US"
+    feed = feedparser.parse(url)
+    return [entry.title for entry in feed.entries[:10]]
+
+def scrape_youtube_trending():
+    url = "https://www.youtube.com/feed/trending"
+    r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"})
+    titles = re.findall(r'"title":{"runs":
+
+\[{"text":"(.*?)"}', r.text)
+    return titles[:10]
+
+def scrape_reddit_hot():
+    url = "https://www.reddit.com/r/all/hot.json?limit=10"
+    r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"})
+    data = r.json()
+    return [p["data"]["title"] for p in data["data"]["children"]]
+
+# -------------------------------
+# VIRAL TOPIC SELECTION
+# -------------------------------
+
+def pick_best_topic():
+    print("[*] Scraping trending topics...")
+
+    google = scrape_google_trends()
+    youtube = scrape_youtube_trending()
+    reddit = scrape_reddit_hot()
+
+    combined = google + youtube + reddit
+    combined = list(dict.fromkeys(combined))  # dedupe
+
+    print(f"[*] Found {len(combined)} raw trending topics.")
+
+    scoring_prompt = f"""
+You are a YouTube virality expert.
+Score each topic below from 1-10 for viral potential on a faceless channel.
+
+Return ONLY this format:
+score | topic
+
+Topics:
+{chr(10).join(combined)}
+"""
+
+    scored = call_llm(scoring_prompt, temp=0.4, max_tokens=800)
+
+    best_score = -1
+    best_topic = None
+
+    for line in scored.splitlines():
+        m = re.match(r"(\d+)\s*\|\s*(.+)", line)
+        if m:
+            score = int(m.group(1))
+            topic = m.group(2).strip()
+            if score > best_score:
+                best_score = score
+                best_topic = topic
+
+    if not best_topic:
+        best_topic = "Mind-blowing psychology facts"
+
+    print(f"[*] Selected viral topic: {best_topic}")
+    return best_topic
+
+# -------------------------------
+# MAIN TOPIC LOGIC
+# -------------------------------
+
+TOPIC = os.environ.get("TOPIC", "").strip()
+
 if not TOPIC:
-    print("[*] No topic provided. Generating high-demand topic ideas...")
-    topic_prompt = (
-        "You are an expert YouTube strategist. Propose 3 high-demand, high-virality video topics "
-        "for a faceless channel about general interest (money, psychology, life hacks, weird facts). "
-        "Return as numbered list with 1-line rationale each. Do not include anything else."
-    )
-    topics_text = call_openai(topic_prompt, temp=0.8, max_tokens=400)
-    print("[*] Topic ideas:\n", topics_text)
-    m = re.search(r\"1\\.\\s*(.+)\", topics_text)
-    if m:
-        TOPIC = m.group(1).strip()
-    else:
-        TOPIC = "Weird facts that blow your mind"
+    TOPIC = pick_best_topic()
 
 print(f"[*] Using topic: {TOPIC}")
 
-# Viral-optimized prompt
+# -------------------------------
+# VIRAL SCRIPT GENERATION
+# -------------------------------
+
 prompt = f"""
 You are a top YouTube writer and growth strategist. For the topic: "{TOPIC}" produce the following sections
 in this exact labeled format. Be concise, punchy, and optimized for retention and clicks.
@@ -72,53 +139,115 @@ A full spoken script ~900-1400 words, broken into short paragraphs. Requirements
 - Start with a 3-second hook line (very short, high curiosity).
 - Use curiosity loops every 20-40 seconds (tease, then promise payoff).
 - Keep sentences short; paragraphs 1-3 lines max.
-- Include 3 explicit "retention prompts" (phrases that encourage watching to the end).
-- End with a clear payoff and a call-to-action (subscribe/watch next).
+- Include 3 explicit "retention prompts".
+- End with a clear payoff and a call-to-action.
 
-Also return a short "CHAPTERS" section: 5 timestamps with short labels that map to script structure.
-Return nothing else.
+CHAPTERS:
+5 timestamps with short labels.
 """
 
-print("[*] Requesting viral-optimized content from GitHub Models...")
-full_text = call_openai(prompt, temp=0.8, max_tokens=2500)
+print("[*] Generating viral script...")
+full_text = call_llm(prompt, temp=0.8, max_tokens=2500)
 
-# Helper to extract labeled sections
-def extract_section(label, text):
+def extract(label):
     marker = f"{label}:\n"
-    if marker not in text:
+    if marker not in full_text:
         return ""
-    start = text.index(marker) + len(marker)
+    start = full_text.index(marker) + len(marker)
     next_labels = ["TITLE:\n","DESCRIPTION:\n","THUMBNAIL_TEXT:\n","SCRIPT:\n","CHAPTERS:\n"]
-    end = len(text)
+    end = len(full_text)
     for nl in next_labels:
         if nl == marker: continue
-        idx = text.find(nl, start)
+        idx = full_text.find(nl, start)
         if idx != -1:
             end = min(end, idx)
-    return text[start:end].strip()
+    return full_text[start:end].strip()
 
-title = extract_section("TITLE", full_text)
-description = extract_section("DESCRIPTION", full_text)
-thumbnail_text = extract_section("THUMBNAIL_TEXT", full_text)
-script = extract_section("SCRIPT", full_text)
-chapters = extract_section("CHAPTERS", full_text)
+title = extract("TITLE")
+description = extract("DESCRIPTION")
+thumbnail_text = extract("THUMBNAIL_TEXT")
+script = extract("SCRIPT")
+chapters = extract("CHAPTERS")
 
 now = datetime.datetime.utcnow().strftime("%Y-%m-%d_%H-%M-%S")
 slug = slugify(TOPIC)[:60]
 folder = OUT / f"{now}_{slug}"
 folder.mkdir(exist_ok=True)
 
-# Save text files
-(folder / "title.txt").write_text(title, encoding="utf-8")
-(folder / "description.txt").write_text(description, encoding="utf-8")
+(folder / "title.txt").write_text(title)
+(folder / "description.txt").write_text(description)
 (script_path := folder / "script.md").write_text(
-    f"# {title}\n\n## Description\n{description}\n\n## Script\n\n{script}\n\n## Chapters\n{chapters}",
-    encoding="utf-8"
+    f"# {title}\n\n## Description\n{description}\n\n## Script\n\n{script}\n\n## Chapters\n{chapters}"
 )
 
 print(f"[*] Saved script to {script_path}")
 
-# Voiceover
-print("[*] Generating voiceover with gTTS...")
+# -------------------------------
+# VOICEOVER
+# -------------------------------
+
+print("[*] Generating voiceover...")
 tts = gTTS(script, lang="en")
-audio_path
+audio_path = folder / "voiceover.mp3"
+tts.save(str(audio_path))
+
+# -------------------------------
+# THUMBNAIL
+# -------------------------------
+
+print("[*] Generating thumbnail...")
+thumb_path = folder / "thumbnail.png"
+img = Image.new("RGB", (1280, 720), color=(18,18,18))
+draw = ImageDraw.Draw(img)
+
+lines = [l.strip() for l in thumbnail_text.splitlines() if l.strip()]
+if not lines:
+    lines = textwrap.wrap(title, width=18)[:2]
+
+try:
+    font_large = ImageFont.truetype("DejaVuSans-Bold.ttf", 88)
+    font_small = ImageFont.truetype("DejaVuSans-Bold.ttf", 56)
+except:
+    font_large = ImageFont.load_default()
+    font_small = ImageFont.load_default()
+
+draw.rectangle([(40, 40), (1240, 680)], fill=(28,28,28))
+y = 120
+for i, line in enumerate(lines[:2]):
+    f = font_large if i == 0 else font_small
+    w, h = draw.textsize(line, font=f)
+    x = (1280 - w) // 2
+    draw.text((x, y), line, font=f, fill=(255, 230, 0))
+    y += h + 10
+
+tag = "silver-broccoli"
+tw, th = draw.textsize(tag, font=font_small)
+draw.rectangle([(40, 680-th-20), (40+tw+20, 680)], fill=(255,255,255))
+draw.text((50, 680-th-10), tag, font=font_small, fill=(0,0,0))
+
+img.save(thumb_path)
+
+# -------------------------------
+# VIDEO
+# -------------------------------
+
+print("[*] Generating video...")
+video_path = folder / "final_video.mp4"
+
+subprocess.run([
+    "ffmpeg",
+    "-y",
+    "-loop", "1",
+    "-i", str(thumb_path),
+    "-i", str(audio_path),
+    "-c:v", "libx264",
+    "-tune", "stillimage",
+    "-c:a", "aac",
+    "-b:a", "192k",
+    "-pix_fmt", "yuv420p",
+    "-shortest",
+    str(video_path),
+], check=True)
+
+print(f"[*] Final video: {video_path}")
+print("[*] DONE — Full automation complete.")
