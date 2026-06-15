@@ -8,6 +8,10 @@ on:
         required: true
         type: string
 
+permissions:
+  contents: read
+  models: read
+
 jobs:
   build-video:
     runs-on: ubuntu-latest
@@ -22,6 +26,7 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
+      # openai stays because the GitHub Models client uses the same library
         run: |
           python -m pip install --upgrade pip
           pip install openai python-slugify gTTS pillow
@@ -33,7 +38,7 @@ jobs:
 
       - name: Generate script, audio, thumbnail, and video
         env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TOPIC: ${{ inputs.topic }}
         run: |
           python youtube_full_pipeline.py
