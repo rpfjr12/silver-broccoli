@@ -1,11 +1,13 @@
 name: Full Finished YouTube Video
 
 on:
+  schedule:
+    - cron: '0 12 * * *'   # daily at 12:00 UTC (adjust as needed)
   workflow_dispatch:
 
 permissions:
   contents: read
-  models: read
+  actions: read
 
 jobs:
   build-video:
@@ -21,25 +23,30 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install feedparser requests python-slugify gTTS pillow openai
-
-      - name: Install ffmpeg
+      - name: Install system deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg
+          sudo apt-get install -y ffmpeg curl
 
-      - name: Generate script, audio, thumbnail, and video
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install gTTS requests pillow
+
+      - name: Run pipeline
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          NUM_VIDEOS: 1
+          OUTPUT_ROOT: output
+          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
+          UNSPLASH_ACCESS_KEY: ${{ secrets.UNSPLASH_ACCESS_KEY }}
+          YOUTUBE_CLIENT_SECRETS: ${{ secrets.YOUTUBE_CLIENT_SECRETS }}
+          YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
+          PIPELINE_LOG_LEVEL: INFO
         run: |
           python -u youtube_full_pipeline.py
 
-      - name: Upload output as artifact
+      - name: Upload output artifacts
         uses: actions/upload-artifact@v4
         with:
           name: youtube-output
           path: output/**
+
