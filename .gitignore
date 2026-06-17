@@ -15,24 +15,14 @@ dist/
 env/
 venv/
 
-# Jupyter + tools
-.ipynb_checkpoints/
+# Tool caches
 .pytest_cache/
 .mypy_cache/
+.ruff_cache/
 
 # Logs
 *.log
 logs/
-
-# YouTube automation output
-output/
-*.mp3
-*.mp4
-*.wav
-*.png
-*.jpg
-*.jpeg
-*.srt
 
 # Credentials (never commit these)
 client_secret.json
