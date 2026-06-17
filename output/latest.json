@@ -1,0 +1,23 @@
+{
+  "run_date": "2026-06-17",
+  "title": "5 Weird Facts You Won't Believe",
+  "video_path": "output/2026-06-17/weird_facts_2026-06-17.mp4",
+  "slides": [
+    "output/2026-06-17/slides/slide_01.png",
+    "output/2026-06-17/slides/slide_02.png",
+    "output/2026-06-17/slides/slide_03.png",
+    "output/2026-06-17/slides/slide_04.png",
+    "output/2026-06-17/slides/slide_05.png"
+  ],
+  "facts": [
+    "Honey never truly spoils when stored correctly.",
+    "Some frogs can freeze solid and come back to life when they thaw.",
+    "Octopuses have three hearts, and two of them stop beating when they swim.",
+    "The Eiffel Tower can grow over six inches taller during hot weather.",
+    "Scotland's national animal is the unicorn."
+  ],
+  "renderer": "python-mjpeg-mp4-fallback",
+  "width": 1080,
+  "height": 1920,
+  "slide_seconds": 3
+}
